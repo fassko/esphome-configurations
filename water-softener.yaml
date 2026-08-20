@@ -1,0 +1,394 @@
+esphome:
+  name: water-softener
+  friendly_name: Water Softener
+
+  on_boot:
+    priority: -100
+    then:
+      - delay: 2s
+      - lambda: |-
+          id(boot_pulse_offset) = id(saved_total_pulses);
+
+
+# ============================================================
+# ESP32-S3
+# ============================================================
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+
+# ============================================================
+# NETWORK
+# ============================================================
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  ap:
+    ssid: "Water Softener Fallback"
+    password: !secret fallback_password
+
+captive_portal:
+
+
+# ============================================================
+# HOME ASSISTANT
+# ============================================================
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+
+logger:
+
+
+# ============================================================
+# PERSISTENT WATER COUNTER
+#
+# saved_total_pulses:
+#   Stored in flash and survives reboot / OTA.
+#
+# boot_pulse_offset:
+#   Saved lifetime count when this boot started.
+#
+# Flash is checkpointed every 5 minutes instead of
+# being written on every water pulse.
+# ============================================================
+
+globals:
+
+  - id: saved_total_pulses
+    type: uint64_t
+    restore_value: yes
+    initial_value: '0'
+
+  - id: boot_pulse_offset
+    type: uint64_t
+    restore_value: no
+    initial_value: '0'
+
+
+# ============================================================
+# A02YYUW SALT SENSOR
+#
+# UART Automatic version
+#
+# A02YYUW:
+#
+#   VCC -> ESP32 3V3
+#   GND -> ESP32 GND
+#   TX  -> ESP32 GPIO6
+#
+# RX from the sensor is not required.
+# ============================================================
+
+uart:
+  id: salt_uart
+  rx_pin: GPIO6
+  baud_rate: 9600
+
+
+# ============================================================
+# SAVE WATER COUNTER
+#
+# Save lifetime pulse count every 5 minutes.
+# ============================================================
+
+interval:
+
+  - interval: 5min
+    then:
+      - lambda: |-
+          if (!isnan(id(water_softener_session_pulses).state)) {
+
+            uint64_t session =
+                (uint64_t) id(water_softener_session_pulses).state;
+
+            uint64_t lifetime =
+                id(boot_pulse_offset) + session;
+
+            if (lifetime != id(saved_total_pulses)) {
+              id(saved_total_pulses) = lifetime;
+            }
+          }
+
+
+# ============================================================
+# SENSORS
+# ============================================================
+
+sensor:
+
+  # ==========================================================
+  # RAW WATER METER
+  #
+  # Pallas / Clack:
+  #
+  #   WHITE -> ESP32 GPIO4
+  #   BLACK -> ESP32 GND
+  #   RED   -> DO NOT CONNECT TO ESP32
+  #
+  # ESP32 is powered separately through USB-C.
+  #
+  # Initial calibration:
+  #
+  #   16.38 pulses = 1 litre
+  #
+  # NO ESP32 internal pull-up enabled.
+  # ==========================================================
+
+  - platform: pulse_meter
+    pin:
+      number: GPIO4
+      mode:
+        input: true
+
+    id: water_softener_pulse_rate
+    name: "Water Softener Pulse Rate"
+
+    unit_of_measurement: "pulses/min"
+    accuracy_decimals: 1
+
+    # Raw pulse total for the current boot session.
+    # This stays internal because HA gets the persistent
+    # lifetime total below.
+    total:
+      id: water_softener_session_pulses
+      internal: true
+
+
+  # ==========================================================
+  # CURRENT WATER FLOW
+  #
+  # pulse_meter gives pulses/min.
+  #
+  # pulses/min / 16.38 = litres/min
+  # ==========================================================
+
+  - platform: template
+    id: water_softener_flow
+    name: "Water Softener Flow"
+
+    unit_of_measurement: "L/min"
+    device_class: volume_flow_rate
+    state_class: measurement
+    accuracy_decimals: 2
+
+    update_interval: 5s
+
+    lambda: |-
+      if (isnan(id(water_softener_pulse_rate).state)) {
+        return 0.0;
+      }
+
+      return id(water_softener_pulse_rate).state / 16.38;
+
+
+  # ==========================================================
+  # TOTAL WATER - LITRES
+  #
+  # Persistent lifetime water consumption.
+  #
+  # USE THIS SENSOR FOR:
+  #
+  # Home Assistant
+  # Settings -> Dashboards -> Energy
+  # -> Water consumption
+  # ==========================================================
+
+  - platform: template
+    id: water_softener_total_water
+    name: "Water Softener Total Water"
+
+    unit_of_measurement: "L"
+    device_class: water
+    state_class: total_increasing
+    accuracy_decimals: 1
+
+    update_interval: 10s
+
+    lambda: |-
+      if (isnan(id(water_softener_session_pulses).state)) {
+        return id(saved_total_pulses) / 16.38;
+      }
+
+      uint64_t session =
+          (uint64_t) id(water_softener_session_pulses).state;
+
+      uint64_t total_pulses =
+          id(boot_pulse_offset) + session;
+
+      return total_pulses / 16.38;
+
+
+  # ==========================================================
+  # TOTAL WATER - m³
+  # ==========================================================
+
+  - platform: template
+    id: water_softener_total_water_m3
+    name: "Water Softener Total Water m3"
+
+    unit_of_measurement: "m³"
+    device_class: water
+    state_class: total_increasing
+    accuracy_decimals: 3
+
+    update_interval: 10s
+
+    lambda: |-
+      if (isnan(id(water_softener_session_pulses).state)) {
+        return (id(saved_total_pulses) / 16.38) / 1000.0;
+      }
+
+      uint64_t session =
+          (uint64_t) id(water_softener_session_pulses).state;
+
+      uint64_t total_pulses =
+          id(boot_pulse_offset) + session;
+
+      return (total_pulses / 16.38) / 1000.0;
+
+
+  # ==========================================================
+  # RAW LIFETIME PULSES
+  #
+  # Useful later for calibration.
+  # ==========================================================
+
+  - platform: template
+    id: water_softener_total_pulses
+    name: "Water Softener Total Pulses"
+
+    unit_of_measurement: "pulses"
+    accuracy_decimals: 0
+    entity_category: diagnostic
+
+    update_interval: 10s
+
+    lambda: |-
+      if (isnan(id(water_softener_session_pulses).state)) {
+        return id(saved_total_pulses);
+      }
+
+      uint64_t session =
+          (uint64_t) id(water_softener_session_pulses).state;
+
+      return id(boot_pulse_offset) + session;
+
+
+  # ==========================================================
+  # SALT DISTANCE - A02YYUW
+  #
+  # Sensor continuously measures over UART.
+  # Median filter smooths the uneven salt surface.
+  #
+  # Published to HA every ~60 seconds.
+  # ==========================================================
+
+  - platform: a02yyuw
+    uart_id: salt_uart
+
+    id: salt_distance
+    name: "Salt Distance"
+
+    accuracy_decimals: 2
+
+    filters:
+      - median:
+          window_size: 5
+          send_every: 5
+          send_first_at: 3
+
+      - throttle: 60s
+
+
+  # ==========================================================
+  # WIFI SIGNAL - dBm
+  # ==========================================================
+
+  - platform: wifi_signal
+    name: "Water Softener WiFi Signal"
+    id: water_softener_wifi_signal
+
+    update_interval: 60s
+    entity_category: diagnostic
+
+
+  # ==========================================================
+  # WIFI SIGNAL - %
+  #
+  # Approximate conversion:
+  #
+  # -50 dBm  = 100%
+  # -60 dBm  = 80%
+  # -70 dBm  = 60%
+  # -80 dBm  = 40%
+  # -90 dBm  = 20%
+  # -100 dBm = 0%
+  # ==========================================================
+
+  - platform: copy
+    source_id: water_softener_wifi_signal
+
+    name: "Water Softener WiFi Signal Percent"
+    id: water_softener_wifi_signal_percent
+
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    entity_category: diagnostic
+
+    filters:
+      - lambda: |-
+          return min(max(2 * (x + 100.0), 0.0), 100.0);
+
+
+  # ==========================================================
+  # UPTIME
+  # ==========================================================
+
+  - platform: uptime
+    name: "Water Softener Uptime"
+
+    update_interval: 60s
+    entity_category: diagnostic
+
+
+# ============================================================
+# NETWORK INFORMATION
+# ============================================================
+
+text_sensor:
+
+  - platform: wifi_info
+
+    ip_address:
+      name: "Water Softener IP Address"
+      entity_category: diagnostic
+
+    ssid:
+      name: "Water Softener Connected SSID"
+      entity_category: diagnostic
+
+    mac_address:
+      name: "Water Softener MAC Address"
+      entity_category: diagnostic
+
+
+# ============================================================
+# RESTART BUTTON
+# ============================================================
+
+button:
+
+  - platform: restart
+    name: "Water Softener Restart"
+    icon: "mdi:restart"
+    entity_category: diagnostic
