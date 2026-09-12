@@ -172,6 +172,9 @@ sensor:
     unit_of_measurement: "pulses/min"
     accuracy_decimals: 1
 
+    filters:
+      - throttle: 5s
+
     # Raw pulse total for the current boot session.
     # This stays internal because HA gets the persistent
     # lifetime total below.
