@@ -1,3 +1,16 @@
+# ============================================================
+# SALT CONTAINER
+#
+# salt_container_height_cm:
+#   Distance from the sensor (mounted at the top of the
+#   container) down to an EMPTY container bottom.
+#   Used to convert raw distance into remaining salt level.
+# ============================================================
+
+substitutions:
+  salt_container_height_cm: "90"
+
+
 esphome:
   name: water-softener
   friendly_name: Water Softener
@@ -93,6 +106,9 @@ uart:
   id: salt_uart
   rx_pin: GPIO6
   baud_rate: 9600
+  data_bits: 8
+  parity: NONE
+  stop_bits: 1
 
 
 # ============================================================
@@ -295,19 +311,104 @@ sensor:
 
   - platform: a02yyuw
     uart_id: salt_uart
+    id: salt_distance_raw
+    name: "Salt Distance Raw"
 
+    unit_of_measurement: "mm"
+    accuracy_decimals: 0
+
+    internal: true
+
+  - platform: template
     id: salt_distance
     name: "Salt Distance"
 
-    accuracy_decimals: 2
+    unit_of_measurement: "m"
+    device_class: distance
+    state_class: measurement
+    accuracy_decimals: 3
 
-    filters:
-      - median:
-          window_size: 5
-          send_every: 5
-          send_first_at: 3
+    update_interval: 30s
 
-      - throttle: 60s
+    lambda: |-
+      if (isnan(id(salt_distance_raw).state)) {
+        return NAN;
+      }
+
+      return id(salt_distance_raw).state / 1000.0f;
+
+
+  # ==========================================================
+  # SALT DISTANCE - cm
+  # ==========================================================
+
+  - platform: template
+    id: salt_distance_cm
+    name: "Salt Distance cm"
+
+    unit_of_measurement: "cm"
+    device_class: distance
+    state_class: measurement
+    accuracy_decimals: 1
+
+    update_interval: 30s
+
+    lambda: |-
+      if (isnan(id(salt_distance_raw).state)) {
+        return NAN;
+      }
+
+      return id(salt_distance_raw).state / 10.0f;
+
+
+  # ==========================================================
+  # SALT REMAINING - cm
+  #
+  # Container height minus distance from sensor to salt
+  # surface. Clamped to the container height so a sensor
+  # reading below the mounting offset doesn't overshoot.
+  # ==========================================================
+
+  - platform: template
+    id: salt_remaining_cm
+    name: "Salt Remaining cm"
+
+    unit_of_measurement: "cm"
+    device_class: distance
+    state_class: measurement
+    accuracy_decimals: 1
+
+    update_interval: 30s
+
+    lambda: |-
+      if (isnan(id(salt_distance_raw).state)) {
+        return NAN;
+      }
+
+      float remaining = ${salt_container_height_cm} - (id(salt_distance_raw).state / 10.0f);
+
+      return min(max(remaining, 0.0f), (float) ${salt_container_height_cm});
+
+
+  # ==========================================================
+  # SALT LEVEL - %
+  # ==========================================================
+
+  - platform: template
+    id: salt_level_percent
+    name: "Salt Level Percent"
+
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+
+    update_interval: 30s
+
+    lambda: |-
+      if (isnan(id(salt_remaining_cm).state)) {
+        return NAN;
+      }
+
+      return (id(salt_remaining_cm).state / ${salt_container_height_cm}) * 100.0f;
 
 
   # ==========================================================
